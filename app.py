@@ -128,7 +128,6 @@ def load_portwatch_activity(port: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame()
     
-    # rest of your existing logic stays exactly the same...
     if "portcalls" not in df.columns:
         return pd.DataFrame()
     portcalls = df["portcalls"].astype(float)
