@@ -3,7 +3,7 @@ numpy>=1.26,<2.0
 requests==2.31.0
 streamlit>=1.40
 plotly>=5.20
-scikit-learn>=1.4,<1.6
+scikit-learn>=1.6
 scipy>=1.13,<1.14
 xgboost==2.0.3
 pyarrow>=17,<19

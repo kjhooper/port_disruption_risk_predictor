@@ -14,6 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
+import requests
 
 from fetch import fetch_openmeteo_historical, fetch_openmeteo_forecast, update_or_fetch, PORTS
 from quality import run_all_checks, quality_summary_df
@@ -87,36 +88,47 @@ with st.sidebar:
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
+RELEASE_BASE_URL = "https://github.com/kjhooper/port_disruption_risk_predictor/releases/download/dashboard"
+
+
+def _load_parquet_from_release(filename: str) -> pd.DataFrame:
+    """Load a parquet file from GitHub releases, cache locally after first download."""
+    local_path = Path("data") / filename
+    local_path.parent.mkdir(exist_ok=True)
+    if not local_path.exists():
+        url = f"{RELEASE_BASE_URL}/{filename}"
+        r = requests.get(url)
+        r.raise_for_status()
+        local_path.write_bytes(r.content)
+    return pd.read_parquet(local_path)
+
 @st.cache_data(ttl=3600, show_spinner="Loading weather data...")
 def load_data(port: str, days_back: int):
-    wide_path = Path("data") / f"{port}_historical_wide.parquet"
-    fore_path = Path("data") / f"{port}_forecast.parquet"
-    if wide_path.exists() and fore_path.exists():
+    try:
         cutoff = datetime.utcnow() - timedelta(days=days_back)
-        hist = pd.read_parquet(wide_path)
+        hist = _load_parquet_from_release(f"{port}_historical_wide.parquet")
         hist = hist[hist.index >= cutoff]
-        fore = pd.read_parquet(fore_path)
-    else:
+        fore = _load_parquet_from_release(f"{port}_forecast.parquet")
+    except Exception:
         hist = fetch_openmeteo_historical(port, days_back=days_back)
         fore = fetch_openmeteo_forecast(port, days_ahead=7)
     return hist, fore
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_full_hist(port: str) -> pd.DataFrame:
-    """Full historical_wide parquet (unfiltered) — needed for M3 lag features."""
-    wide_path = Path("data") / f"{port}_historical_wide.parquet"
-    return pd.read_parquet(wide_path) if wide_path.exists() else pd.DataFrame()
-
+    try:
+        return _load_parquet_from_release(f"{port}_historical_wide.parquet")
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_portwatch_activity(port: str) -> pd.DataFrame:
-    """Load PortWatch daily portcall data and compute rolling baseline metrics."""
-    from features import make_holiday_features, PORT_HOLIDAY_CALENDARS
-    path = Path("data") / f"{port}_portwatch_activity.parquet"
-    if not path.exists():
+    try:
+        df = _load_parquet_from_release(f"{port}_portwatch_activity.parquet")
+    except Exception:
         return pd.DataFrame()
-    df = pd.read_parquet(path)
+    
+    # rest of your existing logic stays exactly the same...
     if "portcalls" not in df.columns:
         return pd.DataFrame()
     portcalls = df["portcalls"].astype(float)
@@ -136,28 +148,6 @@ def load_portwatch_activity(port: str) -> pd.DataFrame:
         df["is_holiday"]   = 0
         df["holiday_name"] = ""
     return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def compute_m2_hindcast(port: str, _m2_model, days_back: int) -> pd.Series:
-    """Run M2 on full historical data and return hourly disruption probabilities."""
-    wide_path = Path("data") / f"{port}_historical_wide.parquet"
-    if not wide_path.exists():
-        return pd.Series(dtype=float)
-    df = pd.read_parquet(wide_path)
-    cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days_back)
-    df = df[df.index >= cutoff]
-    try:
-        feat_df = compute_all_features(df.copy(), port)
-        X = build_feature_matrix(feat_df, port, include_zones=False)
-        for col in _m2_model.feature_names_in_:
-            if col not in X.columns:
-                X[col] = 0.0
-        X = X[list(_m2_model.feature_names_in_)]
-        probs = _m2_model.predict_proba(X)[:, 1]
-        return pd.Series(probs, index=X.index, name="m2_prob")
-    except Exception:
-        return pd.Series(dtype=float)
 
 
 @st.cache_resource
