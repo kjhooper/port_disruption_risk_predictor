@@ -1,0 +1,31 @@
+{
+    "sqltools.connections": [
+        {
+            "mysqlOptions": {
+                "authProtocol": "default",
+                "enableSsl": "Disabled"
+            },
+            "previewLimit": 50,
+            "server": "tidb.zffqvc10cb9i.clusters.tidb-cloud.com",
+            "port": 4000,
+            "driver": "TiDB",
+            "name": "allocationtensor-dev",
+            "database": "allocationtensor_dev",
+            "username": "mlplatform.root"
+        },
+        {
+            "mysqlOptions": {
+                "authProtocol": "default",
+                "enableSsl": "Disabled"
+            },
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "tidb.zffqvc10cb9i.clusters.tidb-cloud.com",
+            "port": 4000,
+            "driver": "TiDB",
+            "database": "allocationtensor_test",
+            "username": "mlplatform.root",
+            "name": "allocationtensor_test"
+        }
+    ]
+}
