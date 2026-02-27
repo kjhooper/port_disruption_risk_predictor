@@ -98,6 +98,57 @@ def classify_columns(df: pd.DataFrame, port: str) -> dict:
     return groups
 
 
+def _bearing_label(deg: float) -> str:
+    """Convert compass bearing to cardinal direction label."""
+    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return dirs[round(deg / 45) % 8]
+
+
+def _zone_col_desc(col: str) -> tuple:
+    """Auto-generate (units, relevance, description) for a zone column."""
+    if col.endswith("_pressure_gradient"):
+        return "hPa", "HIGH", "Port pressure − zone pressure. Positive = lower pressure offshore → storm drawn toward port."
+    if col.endswith("_cape_excess"):
+        return "J/kg", "HIGH", "Convective energy surplus upstream vs port level. Storm fuel building in the approach corridor."
+    if col.endswith("_wind_delta"):
+        return "m/s", "HIGH", "Zone onshore wind − port onshore wind. Positive = wind accelerating toward the port."
+    if col.endswith("_onshore_wind"):
+        return "m/s", "MEDIUM", "Onshore wind component at this upstream zone — is upstream wind heading portward?"
+    if col.endswith("_wind_speed_10m"):
+        return "m/s", "MEDIUM", "Raw wind speed at the upstream zone measurement point."
+    if col.endswith("_wind_direction_10m"):
+        return "°", "LOW", "Wind direction at the upstream zone measurement point."
+    if col.endswith("_pressure_msl"):
+        return "hPa", "MEDIUM", "Sea-level pressure at the upstream zone → feeds pressure_gradient computation."
+    if col.endswith("_cape"):
+        return "J/kg", "MEDIUM", "CAPE at the upstream zone → feeds cape_excess computation."
+    if col.endswith("_precipitation"):
+        return "mm/hr", "LOW", "Precipitation at the upstream zone measurement point."
+    return "—", "—", f"Upstream zone measurement: {col}"
+
+
+def _rolling_col_desc(col: str) -> tuple:
+    """Auto-generate (units, relevance, description) for a rolling statistics column."""
+    _base_units = {
+        "wind_speed_10m": "m/s", "onshore_wind": "m/s",
+        "precipitation": "mm/hr", "cape": "J/kg",
+        "storm_approach_index": "0–1",
+    }
+    m = re.match(r"^(.+)_(mean|max)_(\d+)h$", col)
+    if m:
+        base, stat, h = m.group(1), m.group(2), m.group(3)
+        units = _base_units.get(base, "—")
+        if stat == "mean":
+            return units, "MEDIUM", f"Rolling {h}-hour mean of {base}. Smooths noise — captures sustained conditions, not transient spikes."
+        else:
+            return units, "MEDIUM", f"Rolling {h}-hour maximum of {base}. Catches brief peak extremes within the window."
+    if col == "pressure_drop_6h":
+        return "hPa", "HIGH", "6-hour pressure change (diff(6)). Negative = rapidly falling pressure = storm approaching. Key pre-storm signal."
+    if col == "humidity_mean_6h":
+        return "%", "MEDIUM", "6-hour rolling mean humidity. Sustained values > 95% precede fog events."
+    return "—", "—", f"Rolling statistic: {col}"
+
+
 def make_layout(height: int = 400, title: str = None, **overrides) -> dict:
     """Shared Plotly layout dict for all charts."""
     layout = dict(
@@ -136,7 +187,7 @@ def load_features(port: str, days_back: int) -> pd.DataFrame:
 
 with st.sidebar:
     st.markdown("## 🔬 Feature Review")
-    st.markdown("*Sprint 2 — Statistical Review*")
+    st.markdown("*In-depth statistical review of weather features, data quality, and disruption labels.*")
     st.divider()
 
     port = st.selectbox(
@@ -182,9 +233,14 @@ st.markdown(f"# {PORTS[port]['label']} — Feature Review")
 st.markdown(f"*{days_back} days · {len(feat_df):,} rows · {len(feat_df.columns)} columns*")
 
 hc1, hc2, hc3 = st.columns(3)
-hc1.metric("Weather event hours (WMO code > 3)", f"{_n_events:,}")
+hc1.metric("Non-clear weather hours", f"{_n_events:,}")
 hc2.metric("Event rate", f"{_event_rate:.1f}%")
 hc3.metric("Columns", len(feat_df.columns))
+st.info(
+    "This page validates the data that feeds the M1/M2/M3 models. Use it to check data completeness, "
+    "understand how features behave over time, and confirm that the disruption labels are reliable. "
+    "Tabs are roughly ordered from 'start here' (quality, ground truth) to 'dive deeper' (ACF, anomalies)."
+)
 st.divider()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -196,7 +252,7 @@ tab_glossary, tab_quality, tab_anomaly, tab_stl, tab_shift, tab_xcorr, tab_gt, t
     "📉 STL Decomposition",
     "📊 Distribution Shift",
     "🔗 Cross-correlation Lags",
-    "🎯 Ground Truth",
+    "🏷️ Weather Events & Labels",
     "📈 ACF / PACF",
     "🌡 Seasonality",
 ])
@@ -207,11 +263,196 @@ tab_glossary, tab_quality, tab_anomaly, tab_stl, tab_shift, tab_xcorr, tab_gt, t
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_glossary:
-    st.markdown("### Feature Glossary")
-    st.markdown("Formula, physical meaning, and disruption relevance for every feature group.")
+    st.markdown("### Feature Breakdown")
+    st.markdown(
+        "Features are grouped into four categories, each with a distinct role in the disruption pipeline. "
+        "Use the table below to understand what each variable measures and why it's included."
+    )
 
-    # ── Raw Open-Meteo variables ──────────────────────────────────────────────
-    with st.expander("🌐 Raw Variables (Open-Meteo / NOAA)", expanded=False):
+    # ── Category overview cards ───────────────────────────────────────────────
+    n_raw      = len(col_groups["raw"])
+    n_zone     = len(col_groups["zone"])
+    n_computed = len(col_groups["computed"])
+    n_rolling  = len(col_groups["rolling"])
+
+    oc1, oc2, oc3, oc4 = st.columns(4)
+    with oc1:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div style="font-size:0.7rem;color:#4a9eff;font-family:'Space Mono',monospace;letter-spacing:.08em">🌐 ORIGINAL</div>
+          <div style="font-size:2rem;font-weight:700;color:#4a9eff">{n_raw}</div>
+          <div style="font-size:0.75rem;color:#aaa;margin-top:4px">Direct measurements at the port — atmospheric, marine, and air quality variables from Open-Meteo and NOAA buoys.</div>
+        </div>""", unsafe_allow_html=True)
+    with oc2:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div style="font-size:0.7rem;color:#a855f7;font-family:'Space Mono',monospace;letter-spacing:.08em">🗺 ZONAL</div>
+          <div style="font-size:2rem;font-weight:700;color:#a855f7">{n_zone}</div>
+          <div style="font-size:0.75rem;color:#aaa;margin-top:4px">Same variables sampled 150 km and 300 km upstream. Gives the model a 6–18 h early-warning corridor before weather arrives at the port.</div>
+        </div>""", unsafe_allow_html=True)
+    with oc3:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div style="font-size:0.7rem;color:#00d4aa;font-family:'Space Mono',monospace;letter-spacing:.08em">⚙️ COMPUTED</div>
+          <div style="font-size:2rem;font-weight:700;color:#00d4aa">{n_computed}</div>
+          <div style="font-size:0.75rem;color:#aaa;margin-top:4px">Physics-derived features: directional wind decomposition, fog risk, storm approach index, and port calendar effects.</div>
+        </div>""", unsafe_allow_html=True)
+    with oc4:
+        st.markdown(f"""
+        <div class="metric-card">
+          <div style="font-size:0.7rem;color:#f5a623;font-family:'Space Mono',monospace;letter-spacing:.08em">📈 ROLLING</div>
+          <div style="font-size:2rem;font-weight:700;color:#f5a623">{n_rolling}</div>
+          <div style="font-size:0.75rem;color:#aaa;margin-top:4px">3 / 6 / 12 / 24-hour trend windows. Captures building storms and sustained conditions — not just point-in-time snapshots.</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── How categories work together ──────────────────────────────────────────
+    st.markdown("#### How the categories work together")
+    st.markdown("""
+| Category | Source | Key question answered | Role in the model |
+|---|---|---|---|
+| 🌐 **Original** | Open-Meteo API + NOAA buoys | *What is the weather at the port right now?* | Direct physical thresholds (wind > 15 m/s, wave > 2.5 m) and raw inputs to M1/M2 classifiers |
+| 🗺 **Zonal** | Same API, upstream points at 150 / 300 km | *What weather is approaching the port?* | Pressure gradient and CAPE surplus give the model a 6–18 h early-warning lead over the port-level signal |
+| ⚙️ **Computed** | Derived from Original + Zone variables | *How dangerous is the current atmosphere?* | Non-linear physics: fog likelihood, storm approach composite, wind direction relative to port exposure |
+| 📈 **Rolling** | Rolling windows over Original + Computed | *Is the situation getting worse?* | Persistence and trend signals — severe disruptions build gradually; point-in-time values miss this |
+    """)
+
+    st.divider()
+
+    # ── Zone prefix reference for this port ──────────────────────────────────
+    st.markdown("#### Upstream zone reference")
+    zone_info = zone_points(port)
+    if zone_info:
+        zone_rows = []
+        for z in zone_info:
+            zone_rows.append({
+                "Prefix":              z["prefix"],
+                "Distance":            f"{z['distance_km']} km upstream",
+                "Direction":           f"{z['bearing']}° ({_bearing_label(z['bearing'])})",
+                "Coordinates":         f"{z['lat']:.2f}°N, {z['lon']:.2f}°E",
+                "Lead time (approx)":  f"{'6–10' if z['distance_km'] <= 150 else '12–18'} h",
+                "Key derived columns": "…_pressure_gradient, …_cape_excess, …_wind_delta, …_onshore_wind",
+            })
+        st.dataframe(pd.DataFrame(zone_rows), hide_index=True, use_container_width=True)
+        st.caption(
+            f"Zone points are sampled in the port's primary weather exposure direction "
+            f"(sea_bearing = {PORTS[port]['sea_bearing']}°). "
+            "Weather typically travels at 30–50 km/h, so 150 km ≈ 3–5 h travel time; "
+            "gradient features update every hour as the atmosphere evolves."
+        )
+    else:
+        st.info("No upstream zone points configured for this port.")
+
+    st.divider()
+
+    # ── Browse all features ───────────────────────────────────────────────────
+    st.markdown("#### Browse all features in this dataset")
+
+    _desc_lookup = {
+        # Original
+        "wind_speed_10m":       ("m/s",   "HIGH",   "Mean 10-m wind speed. Primary M2 disruption criterion: > 15 m/s."),
+        "wind_gusts_10m":       ("m/s",   "HIGH",   "Peak instantaneous gust. Disruption criterion: > 22 m/s. Sudden hazard for vessel manoeuvring."),
+        "wind_direction_10m":   ("°",     "MEDIUM", "Wind bearing (0 = N). Used to decompose into onshore / cross-shore components relative to the port's exposure direction."),
+        "precipitation":        ("mm/hr", "MEDIUM", "Hourly rainfall. Heavy rain reduces terminal visibility and can flood low-lying infrastructure."),
+        "pressure_msl":         ("hPa",   "HIGH",   "Mean sea-level pressure. Rapid fall over 6 h signals an approaching storm system."),
+        "temperature_2m":       ("°C",    "LOW",    "2-m air temperature. Combined with dew point to compute fog risk (td_spread)."),
+        "dew_point_2m":         ("°C",    "MEDIUM", "Dew point temperature. Converges with temperature when fog is imminent (td_spread < 2°C)."),
+        "relative_humidity_2m": ("%",     "MEDIUM", "Relative humidity. Sustained values > 95% precede fog events; feeds humidity_mean_6h."),
+        "cloud_cover":          ("%",     "LOW",    "Total cloud fraction. Visibility proxy; rarely the sole disruption cause."),
+        "visibility":           ("m",     "HIGH",   "Horizontal visibility. < 1 000 m typically triggers VTS speed/movement restrictions."),
+        "weather_code":         ("WMO",   "MEDIUM", "WMO present-weather code (0–99). Groups map to M1 classifier classes: clear / fog / rain / showers / thunderstorm."),
+        "cape":                 ("J/kg",  "HIGH",   "Convective Available Potential Energy — thunderstorm fuel. > 1 000 J/kg = elevated risk; > 3 000 = extreme."),
+        "lifted_index":         ("K",     "HIGH",   "Atmospheric stability index. Negative = unstable; ≤ −4 = severe convection likely."),
+        "wave_height":          ("m",     "HIGH",   "Significant wave height. Disruption criterion: > 2.5 m for Rotterdam / Singapore."),
+        "wave_period":          ("s",     "MEDIUM", "Mean wave period. Long period = distant swell energy affecting mooring loads."),
+        "wind_wave_height":     ("m",     "HIGH",   "Wind-sea wave component. Distinguishes local chop (clears quickly) from distant swell."),
+        "dust":                 ("μg/m³", "LOW",    "Atmospheric dust. Relevant for Gulf / East Asian corridors; reduces visibility."),
+        # Computed — directional wind
+        "onshore_wind":         ("m/s",   "HIGH",   "Wind pushing weather from sea to port: wind_speed × cos(wind_dir − sea_bearing). Positive = inbound system."),
+        "cross_wind":           ("m/s",   "MEDIUM", "Wind parallel to the coastline: wind_speed × sin(wind_dir − sea_bearing). High = beam-on vessel exposure."),
+        "wind_onshore_flag":    ("0/1",   "MEDIUM", "Binary: 1 when onshore_wind > 0. Simple classifier feature marking inbound weather regime."),
+        # Computed — fog
+        "td_spread":            ("°C",    "HIGH",   "Temperature − dew point depression. < 2°C = fog likely; < 0.5°C = dense fog. One of the five M2 label criteria."),
+        "fog_risk_score":       ("0–1",   "HIGH",   "Continuous fog probability: 1 − clip(td_spread, 0, 5) / 5. Gives the model a gradient signal instead of a hard step."),
+        "fog_flag":             ("0/1",   "HIGH",   "Binary fog indicator (td_spread < 2°C). Used directly as one of the five M2 disruption label criteria."),
+        # Computed — storm index
+        "storm_approach_index": ("0–1",   "HIGH",   "Composite of up to 5 normalised signals: CAPE, Lifted Index, onshore wind, upstream CAPE, upstream pressure. ≥ 0.5 = concern."),
+        # Computed — holiday
+        "is_holiday":           ("0/1",   "MEDIUM", "1 on national public holidays (port-country calendar). Traffic drops on holidays are calendar-driven, not weather-driven — excluded from M2 labels."),
+        "days_to_holiday":      ("days",  "MEDIUM", "Signed distance to nearest public holiday (−14 to +14). Captures pre-holiday slowdowns and post-holiday recovery patterns."),
+    }
+
+    browse_rows = []
+    cat_order = {"🌐 Original": 0, "🗺 Zonal": 1, "⚙️ Computed": 2, "📈 Rolling": 3}
+
+    for col in feat_df.columns:
+        grp = col_to_group.get(col, "computed")
+        if grp == "raw":
+            cat = "🌐 Original"
+        elif grp == "zone":
+            cat = "🗺 Zonal"
+        elif grp == "rolling":
+            cat = "📈 Rolling"
+        else:
+            cat = "⚙️ Computed"
+
+        if col in _desc_lookup:
+            units, relevance, desc = _desc_lookup[col]
+        elif grp == "zone":
+            units, relevance, desc = _zone_col_desc(col)
+        elif grp == "rolling":
+            units, relevance, desc = _rolling_col_desc(col)
+        else:
+            units, relevance, desc = "—", "—", col
+
+        browse_rows.append({
+            "Feature":                 col,
+            "Category":                cat,
+            "Units":                   units,
+            "Disruption relevance":    relevance,
+            "Description / intention": desc,
+        })
+
+    browse_df = pd.DataFrame(browse_rows)
+    browse_df["_sort"] = browse_df["Category"].map(cat_order).fillna(99)
+    browse_df = browse_df.sort_values(["_sort", "Feature"]).drop(columns="_sort").reset_index(drop=True)
+
+    fc1, fc2 = st.columns([1, 3])
+    with fc1:
+        cat_filter = st.multiselect(
+            "Filter by category",
+            options=["🌐 Original", "🗺 Zonal", "⚙️ Computed", "📈 Rolling"],
+            default=["🌐 Original", "🗺 Zonal", "⚙️ Computed", "📈 Rolling"],
+            key="glossary_cat_filter",
+        )
+    with fc2:
+        feat_search = st.text_input("Search feature name or description", "", key="glossary_search")
+
+    filtered_browse = browse_df[browse_df["Category"].isin(cat_filter)]
+    if feat_search:
+        mask = (
+            filtered_browse["Feature"].str.contains(feat_search, case=False, na=False)
+            | filtered_browse["Description / intention"].str.contains(feat_search, case=False, na=False)
+        )
+        filtered_browse = filtered_browse[mask]
+
+    st.dataframe(filtered_browse, hide_index=True, use_container_width=True, height=420)
+    st.caption(
+        f"Showing {len(filtered_browse)} of {len(browse_df)} features · "
+        f"**{PORTS[port]['label']}** · {days_back}-day window"
+    )
+
+    st.divider()
+
+    # ── Detailed reference expanders ──────────────────────────────────────────
+    st.markdown("#### Detailed variable reference")
+    st.success(
+        "**Key disruption drivers:** wind_speed_10m, wind_gusts_10m, wave_height, "
+        "td_spread (fog), storm_approach_index, pressure_drop_6h, and upstream zone pressure_gradient."
+    )
+
+    with st.expander("🌐 Original Variables (Open-Meteo / NOAA)", expanded=False):
         raw_meta = [
             ("wind_speed_10m",       "m/s",   "0–80",    "HIGH",   "Primary disruption driver — threshold 15 m/s"),
             ("wind_gusts_10m",       "m/s",   "0–100",   "HIGH",   "Peak instantaneous wind — sudden hazard"),
@@ -226,7 +467,7 @@ with tab_glossary:
             ("weather_code",         "WMO",   "0–99",    "MEDIUM", "Coded condition (storm, fog, etc.)"),
             ("cape",                 "J/kg",  "0–10 000","HIGH",   "Convective potential — thunderstorm fuel"),
             ("lifted_index",         "K",     "-20–20",  "HIGH",   "Negative = unstable; -4 or below = severe"),
-            ("wave_height",          "m",     "0–20",    "HIGH",   "Threshold 3m triggers disruption label"),
+            ("wave_height",          "m",     "0–20",    "HIGH",   "Threshold 2.5 m triggers disruption label"),
             ("wave_period",          "s",     "0–30",    "MEDIUM", "Long period = swell energy"),
             ("wind_wave_height",     "m",     "0–20",    "HIGH",   "Wind-driven wave component"),
             ("dust",                 "μg/m³", "0–5 000", "LOW",    "Visibility reduction in arid corridors"),
@@ -234,7 +475,6 @@ with tab_glossary:
         raw_df = pd.DataFrame(raw_meta, columns=["Variable", "Units", "Typical range", "Disruption relevance", "Notes"])
         st.dataframe(raw_df, hide_index=True, use_container_width=True)
 
-    # ── Directional wind ──────────────────────────────────────────────────────
     with st.expander("🧭 Computed — Directional Wind", expanded=False):
         st.markdown("""
 | Feature | Formula | Physical meaning | Risk interpretation |
@@ -246,7 +486,6 @@ with tab_glossary:
 *`sea_bearing`* is the compass direction from which weather reaches the port (e.g. 270° for Rotterdam = North Sea to the west).
         """)
 
-    # ── Fog risk ──────────────────────────────────────────────────────────────
     with st.expander("🌫 Computed — Fog Risk", expanded=False):
         st.markdown("""
 | Feature | Formula | Physical meaning | Risk interpretation |
@@ -256,10 +495,9 @@ with tab_glossary:
 | `fog_flag` | `1 if td_spread < 2°C` | Binary fog indicator | Used as event label proxy |
         """)
 
-    # ── Zone spatial features ─────────────────────────────────────────────────
-    with st.expander("🗺 Computed — Zone Spatial Features (per prefix)", expanded=False):
+    with st.expander("🗺 Zone Spatial Features (per prefix)", expanded=False):
         st.markdown("""
-Zone prefixes follow the pattern `z150`, `z300` (distance in km), or `z150b45` (distance + bearing) for ports with multiple approach corridors (e.g. Singapore).
+Zone prefixes follow the pattern `z150`, `z300` (distance in km), or `z150b45` (distance + bearing) for ports with multiple approach corridors.
 
 | Feature | Formula | Physical meaning | Risk interpretation |
 |---|---|---|---|
@@ -269,7 +507,6 @@ Zone prefixes follow the pattern `z150`, `z300` (distance in km), or `z150b45` (
 | `{prefix}_onshore_wind` | `zone_wind × cos(zone_dir − bearing)` | Zone onshore component | Measures whether upstream wind is heading portward |
         """)
 
-    # ── Storm Approach Index ──────────────────────────────────────────────────
     with st.expander("⚡ Computed — Storm Approach Index (0–1)", expanded=False):
         st.markdown("""
 Composite signal for a storm being pushed from the sea toward the port.
@@ -286,7 +523,6 @@ Mean of up to **5 normalised components** (only those with available data are in
 **Score ≥ 0.5 = elevated concern. Score ≥ 0.75 = high risk.**
         """)
 
-    # ── Rolling stats ─────────────────────────────────────────────────────────
     with st.expander("📈 Computed — Rolling Statistics", expanded=False):
         rolling_meta = []
         roll_base_cols = ["wind_speed_10m", "onshore_wind", "precipitation", "cape", "storm_approach_index"]
@@ -309,6 +545,7 @@ with tab_quality:
 
     # ── Section A: Quality scorecard ──────────────────────────────────────────
     st.markdown("#### Section A — Quality Scorecard")
+    st.markdown("Checks completeness, duplicate timestamps, out-of-range values, and stale data.")
     report = run_all_checks(feat_df)
 
     score_color = {"ok": "#00d4aa", "warn": "#f5a623", "fail": "#e84545"}.get(report["overall_status"], "white")
@@ -334,10 +571,11 @@ with tab_quality:
     st.divider()
 
     # ── Section B: Missing data T-tests (MNAR analysis) ───────────────────────
-    st.markdown("#### Section B — Missing Data MNAR Analysis")
+    st.markdown("#### Section B — Missing Data Patterns")
     st.markdown(
-        "For each column with missing values, tests whether its missingness correlates with "
-        "other variables using Welch's t-test. Bonferroni correction applied."
+        "For each incomplete column, we test whether its missing values cluster at specific "
+        "weather conditions (MNAR = Missing Not At Random). If they do, imputing with the mean would "
+        "introduce silent bias — better to leave the column as-is or add a 'was_missing' flag."
     )
 
     with st.spinner("Running t-tests for MNAR analysis..."):
@@ -401,6 +639,17 @@ with tab_quality:
             "Columns with no significant associations are likely **MCAR** (safe to mean/median impute)."
         )
 
+        if not mnar_df.empty:
+            mnar_high = mnar_df[mnar_df["n_significant_associations"] > 0]
+            if mnar_high.empty:
+                st.success("No MNAR patterns detected — imputing with column median is safe.")
+            else:
+                st.warning(
+                    f"{len(mnar_high)} column(s) have non-random missingness. "
+                    "These are shown above — avoid mean/median imputation; "
+                    "consider adding a binary 'was_missing' indicator column."
+                )
+
         if st.checkbox("Show full p-value heatmap (−log10 scale)"):
             if all_pvals:
                 mc_list = sorted({k[0] for k in all_pvals})
@@ -436,6 +685,11 @@ with tab_quality:
 
 with tab_anomaly:
     st.markdown("### Anomaly Detection — IsolationForest")
+    st.markdown(
+        "IsolationForest finds unusual combinations of weather variables — rows that don't look "
+        "like normal operating conditions. These can be extreme weather events (useful signal for M2) "
+        "or sensor errors (noise to investigate). The overlap metric tells you which."
+    )
 
     _numeric_set = set(numeric_cols)
     _default_anomaly_feats = [
@@ -488,6 +742,13 @@ with tab_anomaly:
                 am1.metric("Anomalies detected", f"{n_anomalies:,}")
                 am2.metric("% of rows", f"{pct_anomalies:.1f}%")
                 am3.metric("Overlap with weather event label", f"{precision_approx:.1f}%")
+
+                if precision_approx > 50:
+                    st.success(f"Overlap {precision_approx:.0f}% — anomalies are mostly extreme weather events (expected).")
+                elif precision_approx > 20:
+                    st.info(f"Overlap {precision_approx:.0f}% — mix of weather extremes and outliers. Review the table below.")
+                else:
+                    st.warning(f"Overlap {precision_approx:.0f}% — most anomalies aren't weather events. May indicate sensor errors.")
 
                 # Chart
                 fig_anom = go.Figure()
@@ -547,7 +808,14 @@ with tab_anomaly:
 
 with tab_stl:
     st.markdown("### STL Decomposition")
-    st.markdown("Separate trend, seasonal, and residual components for any variable.")
+    st.markdown(
+        "STL splits a time series into three parts: "
+        "**Trend** — the slow drift over weeks/months (e.g. seasonal warming). "
+        "**Seasonal** — the repeating cycle (daily or annual). "
+        "**Residual** — whatever is left after removing trend and seasonal (the 'unpredictable' part). "
+        "Large residuals relative to the seasonal component mean the variable is hard to forecast — useful "
+        "to know before choosing M3 targets."
+    )
 
     non_zone_non_rolling = [
         c for c in numeric_cols
@@ -621,6 +889,14 @@ with tab_stl:
                     sm2.metric("Seasonal amplitude",       f"{float(seasonal.max() - seasonal.min()):.3f}")
                     sm3.metric("Residual std",             f"{float(resid.std()):.3f}")
 
+                    ratio = float(resid.std()) / max(float(seasonal.max() - seasonal.min()), 1e-6)
+                    if ratio < 0.3:
+                        st.success("Residual noise is small relative to the seasonal cycle — this variable is forecastable.")
+                    elif ratio < 1.0:
+                        st.info("Moderate residual noise — M3 should capture the seasonal signal, but uncertainty is real.")
+                    else:
+                        st.warning("Residual dominates — this variable is largely unpredictable from seasonal patterns alone.")
+
                 except Exception as e:
                     st.error(f"STL failed: {e}")
 
@@ -631,7 +907,12 @@ with tab_stl:
 
 with tab_shift:
     st.markdown("### Distribution Shift")
-    st.markdown("Compare the recent window vs the historical baseline using Kolmogorov–Smirnov test.")
+    st.markdown(
+        "Compare the recent window vs the historical baseline using Kolmogorov–Smirnov test. "
+        "A significant shift in the recent window means the current weather regime is unusual compared "
+        "to the training period. M2/M3 models were not trained on this type of weather — predictions "
+        "may be less reliable until conditions normalise."
+    )
 
     _default_shift_cols = [
         c for c in ["wind_speed_10m", "pressure_msl", "fog_risk_score", "storm_approach_index"]
@@ -690,6 +971,15 @@ with tab_shift:
             st.dataframe(styled_shift, hide_index=True, use_container_width=True)
             st.caption("Amber rows: p < 0.05 — distribution has shifted significantly in the recent window.")
 
+            n_shifted = int(shift_df["shifted"].sum())
+            if n_shifted == 0:
+                st.success("No distribution shifts detected — current conditions are within the training distribution.")
+            else:
+                st.warning(
+                    f"{n_shifted} variable(s) have shifted significantly (KS p < 0.05). "
+                    "Models may underperform for these features in the current period."
+                )
+
             # Histogram overlay for most-shifted column
             most_shifted = shift_df.iloc[0]["column"]
             st.markdown(f"#### Distribution Overlay — `{most_shifted}` (most shifted)")
@@ -728,8 +1018,9 @@ with tab_shift:
 with tab_xcorr:
     st.markdown("### Cross-correlation Lags")
     st.markdown(
-        "How far ahead do upstream zone variables lead port conditions? "
-        "A peak at lag=N means the zone variable shifts N hours **before** the port responds."
+        "Zone points are sampled 150km and 300km upstream of the port. "
+        "If upstream pressure drops 10 hours before port pressure drops, that 10-hour lead time is available "
+        "as a predictive feature. A peak at lag=N means the zone variable shifts N hours **before** the port responds."
     )
 
     # Zoneable vars: present at port level AND in at least one zone column
@@ -815,6 +1106,12 @@ with tab_xcorr:
             xcorr_df = pd.DataFrame(xcorr_results).sort_values("distance_km")
             st.dataframe(xcorr_df, hide_index=True, use_container_width=True)
 
+            best = max(xcorr_results, key=lambda r: abs(r["peak_correlation"]))
+            st.info(
+                f"**Best upstream predictor:** {best['zone']} ({best['distance_km']}km) · "
+                f"lead time {best['optimal_lag_hours']}h · r = {best['peak_correlation']:.3f}"
+            )
+
         st.caption(
             "A peak at lag=N means the zone variable tends to shift N hours *before* the port "
             "responds — this is the maximum predictive lead time available from that upstream point."
@@ -826,10 +1123,11 @@ with tab_xcorr:
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_gt:
-    st.markdown("### Ground Truth Analysis — WMO Weather Codes")
+    st.markdown("### Weather Events & Labels")
     st.markdown(
-        "Observed weather codes from Open-Meteo are the ground-truth event labels. "
-        "WMO codes tell us what the weather *actually was* at each hour."
+        "The WMO weather code from Open-Meteo tells us what the weather *actually was* each hour — "
+        "fog, rain, thunderstorm, etc. This is used as the M1 multi-class target and as a proxy for "
+        "M2 labels where PortWatch traffic data is unavailable."
     )
 
     if "weather_code" not in feat_df.columns:
@@ -890,10 +1188,11 @@ with tab_gt:
     st.divider()
 
     # ── Section B — Feature–WMO Correlation Table ─────────────────────────────
-    st.markdown("#### Section B — Feature–WMO Correlation")
+    st.markdown("#### Section B — Which Features Predict Disruptions?")
     st.markdown(
-        "Point-biserial r (binary: event vs clear) and Cohen's d "
-        "(effect size: mean difference in standard deviation units) for each feature."
+        "Higher |r| = stronger association with weather events. Cohen's d shows effect size "
+        "(d > 0.8 is large, d > 0.5 is medium, d > 0.2 is small). Features with high r and d are "
+        "the most important M2 predictors."
     )
 
     include_rolling_gt = st.checkbox("Include rolling features", value=False)
@@ -947,6 +1246,9 @@ with tab_gt:
         )
         st.dataframe(styled_corr, hide_index=True, use_container_width=True)
         st.caption("Teal = significant (p < 0.05). Sorted by |r_pointbiserial| descending.")
+
+        top3 = corr_gt_df.head(3)["feature"].tolist()
+        st.success(f"Top 3 most predictive features: **{', '.join(top3)}**")
 
         st.divider()
 
@@ -1007,7 +1309,7 @@ with tab_gt:
     st.divider()
 
     # ── Section D — Label Drift Over Time ────────────────────────────────────
-    st.markdown("#### Section D — Label Drift Over Time")
+    st.markdown("#### Section D — Are Labels Stable Over Time?")
     st.markdown(
         "Monthly WMO group proportions — checks whether class balance is stable across the archive. "
         "A shift between the training period and test period biases M1/M2 evaluation numbers."
@@ -1064,7 +1366,10 @@ with tab_gt:
             dc2.metric("p-value",          f"{p_chi:.4f}")
             dc3.metric("Drift detected",   "Yes ⚠" if p_chi < 0.05 else "No ✓")
             st.caption(
-                "Chi-square test compares train vs test WMO group distributions. "
+                "Stable proportions (flat stacked chart) = no seasonal bias in labels. "
+                "A large shift near the train/test cutoff means the model was evaluated on an unusually "
+                "different period — treat AUC numbers with some caution. "
+                "Chi-square test compares train vs test WMO group distributions: "
                 "p < 0.05 means class balance has shifted — the time-based split may be biased."
             )
     else:
@@ -1145,9 +1450,11 @@ with tab_gt:
 with tab_acf:
     st.markdown("### ACF / PACF & Stationarity Tests")
     st.markdown(
-        "Autocorrelation (ACF) shows how much a variable correlates with its own past values. "
-        "Partial autocorrelation (PACF) isolates direct lag effects, removing indirect ones. "
-        "PACF spikes identify the exact lag depths worth including as features in M3."
+        "ACF (autocorrelation) shows how much today's wind predicts tomorrow's. PACF isolates "
+        "*direct* effects — a spike at lag 6 means 'knowing the value 6 hours ago adds information "
+        "even after you already know lags 1-5'. Red bars exceed statistical significance (95% CI). "
+        "The ADF test checks whether the series is stationary (trend-free) — non-stationary series "
+        "should be differenced before adding to M3."
     )
 
     _non_zone = [c for c in numeric_cols if col_to_group.get(c) not in ("zone", "rolling")]
@@ -1196,6 +1503,14 @@ with tab_acf:
                 a4.metric("Sig. ACF lags",         str(acf_sig_count))
                 a5.metric("Sig. PACF lags",        str(pacf_sig_count))
 
+                if stationary:
+                    st.success("Series is stationary (ADF p < 0.05) — safe to use as-is in M3.")
+                else:
+                    st.warning(
+                        f"Non-stationary (ADF p = {adf_pval:.3f}). "
+                        "Consider adding a Δ-differenced version (current − previous hour) as an M3 feature."
+                    )
+
                 # ACF + PACF bar charts
                 fig_acf = ps.make_subplots(
                     rows=2, cols=1, vertical_spacing=0.14,
@@ -1236,13 +1551,6 @@ with tab_acf:
                     "Red bars exceed CI — statistically significant autocorrelation. "
                     "PACF spikes directly indicate which lags M3 should use as features."
                 )
-
-                if not stationary:
-                    st.info(
-                        f"ADF p = {adf_pval:.4f} → **non-stationary**. "
-                        "Consider using the first-difference (Δ) of this variable as a model feature. "
-                        f"ADF 5% critical value: {adf_crit['5%']:.4f}."
-                    )
 
             except Exception as e:
                 st.error(f"ACF/PACF computation failed: {e}")
@@ -1404,6 +1712,18 @@ with tab_season:
             ss2.metric("Diurnal range",            f"{diurnal_range:.3f}")
             ss3.metric("Seasonal range",           f"{seasonal_range:.3f}")
             ss4.metric("Seasonal / std",           f"{seasonal_pct:.0f}%")
+
+            if seasonal_pct > 20:
+                st.success(
+                    f"Strong seasonality ({seasonal_pct:.0f}% of std). "
+                    "Adding sin/cos day-of-year features to M1/M2/M3 is likely to improve performance."
+                )
+            else:
+                st.info(
+                    f"Weak seasonality ({seasonal_pct:.0f}% of std). "
+                    "Cyclical time features would have minimal impact for this variable."
+                )
+
             st.caption(
                 "**Diurnal range** = max(hourly mean) − min(hourly mean). "
                 "**Seasonal range** = max(monthly mean) − min(monthly mean). "
@@ -1414,4 +1734,4 @@ with tab_season:
 # ── Footer ────────────────────────────────────────────────────────────────────
 
 st.divider()
-st.caption("Sprint 3/5 · Data Quality & Feature Review · Data: Open-Meteo")
+st.caption("Data: Open-Meteo (archive + forecast) · Labels: WMO codes, PortWatch, NCEI Storm Events · Models: M1/M2/M3")

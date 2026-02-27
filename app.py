@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from fetch import fetch_openmeteo_historical, fetch_openmeteo_forecast, update_or_fetch, PORTS
 from quality import run_all_checks, quality_summary_df
 from features import compute_all_features
-from model import build_feature_matrix, FORECAST_TARGETS, LAG_HOURS, build_lag_features
+from model import build_feature_matrix, FORECAST_TARGETS, LAG_HOURS, build_lag_features, WEATHER_COLORS
 
 # ── Page config ────────────────────────────────────────────────────────────────
 
@@ -285,6 +285,79 @@ def _risk_card_class(p: float) -> str:
     return "risk-low"
 
 
+def _m1_forecast_timeline(fore_df: pd.DataFrame, port: str, m1_model) -> pd.Series:
+    """
+    Run existing M1 classifier on forecast rows.
+    Returns pd.Series indexed by forecast timestamps with string weather group per hour.
+    """
+    try:
+        feat_df = compute_all_features(fore_df.copy(), port)
+        X = build_feature_matrix(feat_df, port, include_zones=False)
+        for col in m1_model.feature_names_in_:
+            if col not in X.columns:
+                X[col] = 0.0
+        X = X[list(m1_model.feature_names_in_)]
+        y_prob = m1_model.predict_proba(X)
+        y_pred_int = y_prob.argmax(axis=1)
+        int_to_label = getattr(m1_model, "_int_to_label", {})
+        return pd.Series(y_pred_int, index=fore_df.index).map(int_to_label)
+    except Exception:
+        return pd.Series(dtype=str)
+
+
+def _m1b_predictions(full_hist: pd.DataFrame, models: dict) -> dict:
+    """
+    Run M1-B forecast classifiers from current lag state.
+    Returns {24: "thunderstorm", 48: "showers", 72: "clear"}.
+    """
+    if full_hist.empty:
+        return {}
+
+    recent = full_hist.tail(48).copy()
+    df_lag = recent.copy()
+    for tgt in FORECAST_TARGETS:
+        if tgt in df_lag.columns:
+            df_lag = build_lag_features(df_lag, tgt, LAG_HOURS)
+    if "weather_code" in df_lag.columns:
+        df_lag = build_lag_features(df_lag, "weather_code", LAG_HOURS)
+
+    extra_cols = [c for c in ["wind_direction_10m", "relative_humidity_2m", "cape"]
+                  if c in df_lag.columns]
+    lag_cols = [f"{tgt}_lag_{h}h" for tgt in FORECAST_TARGETS for h in LAG_HOURS
+                if f"{tgt}_lag_{h}h" in df_lag.columns]
+    weather_lag_cols = [f"weather_code_lag_{h}h" for h in LAG_HOURS
+                        if f"weather_code_lag_{h}h" in df_lag.columns]
+    feature_cols = lag_cols + weather_lag_cols + extra_cols
+
+    X_all = df_lag[feature_cols].ffill().fillna(0)
+    current_idx = recent.index[-1]
+    if current_idx not in X_all.index:
+        return {}
+    X_now = X_all.loc[[current_idx]]
+
+    results: dict = {}
+    for horizon in [24, 48, 72]:
+        key = f"m1_forecast_{horizon}h"
+        if key not in models:
+            continue
+        entry = models[key]
+        clf = entry[0] if isinstance(entry, tuple) else entry
+        try:
+            X_aligned = X_now.copy()
+            for col in clf.feature_names_in_:
+                if col not in X_aligned.columns:
+                    X_aligned[col] = 0.0
+            X_aligned = X_aligned[list(clf.feature_names_in_)]
+            int_to_label = getattr(clf, "_int_to_label", {})
+            y_prob = clf.predict_proba(X_aligned)
+            y_pred_int = int(y_prob.argmax(axis=1)[0])
+            results[horizon] = int_to_label.get(y_pred_int, str(y_pred_int))
+        except Exception:
+            pass
+
+    return results
+
+
 # ── Quality report ─────────────────────────────────────────────────────────────
 
 quality_report = run_all_checks(hist_df)
@@ -293,7 +366,7 @@ summary_df     = quality_summary_df(quality_report)
 # ── Header ─────────────────────────────────────────────────────────────────────
 
 st.markdown(f"# {PORTS[port]['label']}")
-st.markdown(f"Weather data pipeline + disruption risk forecast")
+st.markdown("Weather data pipeline + disruption risk forecast")
 st.divider()
 
 # ── Quality metrics row ────────────────────────────────────────────────────────
@@ -444,6 +517,50 @@ else:
             title=dict(text="72-hour Disruption Probability", font_color="#aaa", font_size=13),
         )
         st.plotly_chart(fig_risk, use_container_width=True)
+
+        # ── Option A: 72h weather type timeline (M1 on forecast rows) ─────────
+        m1_entry = models.get("m1_classifier")
+        if m1_entry is not None:
+            m1_model_a, _ = m1_entry
+            weather_72h = _m1_forecast_timeline(fore_df, port, m1_model_a)
+            if not weather_72h.empty:
+                w72 = weather_72h.iloc[:72]
+                colors_72 = [WEATHER_COLORS.get(w, "#888888") for w in w72]
+
+                fig_wt = go.Figure()
+                fig_wt.add_trace(go.Bar(
+                    x=w72.index,
+                    y=[1] * len(w72),
+                    marker_color=colors_72,
+                    hovertemplate="%{x|%a %d %b %H:%M}<br>%{customdata}<extra></extra>",
+                    customdata=w72.values,
+                    showlegend=False,
+                ))
+                # Dummy scatter traces for legend labels (one per present weather type)
+                for wtype, wcolor in WEATHER_COLORS.items():
+                    if wtype in w72.values:
+                        fig_wt.add_trace(go.Scatter(
+                            x=[None], y=[None],
+                            mode="markers",
+                            marker=dict(color=wcolor, size=10, symbol="square"),
+                            name=wtype,
+                        ))
+                fig_wt.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#0a1118",
+                    plot_bgcolor="#0f1923",
+                    height=100,
+                    margin=dict(l=40, r=20, t=30, b=10),
+                    xaxis=dict(showticklabels=False),
+                    yaxis=dict(showticklabels=False, showgrid=False, range=[0, 1.2]),
+                    legend=dict(orientation="h", y=1.6, x=0),
+                    title=dict(text="72h Weather Type Forecast (M1)", font_color="#aaa", font_size=13),
+                )
+                st.plotly_chart(fig_wt, use_container_width=True)
+                st.caption(
+                    "M1 predicted weather type per forecast hour. "
+                    "Thunderstorm/shower hours explain elevated disruption probability."
+                )
 
 st.divider()
 
@@ -740,6 +857,39 @@ with tab3:
                         yaxis_title="m/s",
                     )
                     st.plotly_chart(fig_m3, use_container_width=True)
+
+        # ── Option B: M1-B weather type predictions from current lag features ──
+        m1b_preds = _m1b_predictions(full_hist, models)
+        if m1b_preds:
+            st.markdown("**M1-B Predicted Weather Type (from current lag features)**")
+            m1b_rows = []
+            for h in [24, 48, 72]:
+                if h in m1b_preds:
+                    wtype = m1b_preds[h]
+                    color = WEATHER_COLORS.get(wtype, "#888888")
+                    m1b_rows.append({
+                        "Horizon": f"T+{h}h",
+                        "Predicted Weather Type": wtype,
+                        "Color": color,
+                    })
+            if m1b_rows:
+                m1b_df = pd.DataFrame(m1b_rows)
+
+                def _color_wtype(val):
+                    color = WEATHER_COLORS.get(val, "#888888")
+                    return f"color: {color}; font-weight: 600"
+
+                st.dataframe(
+                    m1b_df[["Horizon", "Predicted Weather Type"]].style.applymap(
+                        _color_wtype, subset=["Predicted Weather Type"]
+                    ),
+                    hide_index=True,
+                    use_container_width=False,
+                )
+                st.caption(
+                    "M1-B uses lag patterns to predict weather type at each horizon — "
+                    "no NWP forecast needed."
+                )
 
 with tab4:
     st.markdown("**Historical data (last 50 rows)**")

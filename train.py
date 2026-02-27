@@ -19,6 +19,7 @@ from model import (
     train_classifier,
     train_binary,
     train_forecaster,
+    train_forecast_classifier,
     save_models,
 )
 
@@ -58,6 +59,19 @@ def train_port(port: str, mlflow_enabled: bool = False) -> None:
             print(f"    {cls:<16} F1 = {f1:.4f}")
     except Exception as e:
         print(f"  [SKIP] M1 failed: {e}")
+
+    # ── M1-B: Forecast Classifier ──────────────────────────────────────────────
+    print("\n[M1-B] Training Forecast Classifiers (T+24h / T+48h / T+72h)...")
+    try:
+        m1b_models = train_forecast_classifier(df, port)
+        for horizon, (clf, met) in sorted(m1b_models.items()):
+            key = f"m1_forecast_{horizon}h"
+            models_to_save[key] = (clf, met)
+            f1  = met.get("macro_f1", "N/A")
+            roc = met.get("roc_auc",  "N/A")
+            print(f"  T+{horizon:2d}h  Macro F1={f1}  ROC-AUC={roc}")
+    except Exception as e:
+        print(f"  [SKIP] M1-B failed: {e}")
 
     # ── M2: Binary Detector ────────────────────────────────────────────────────
     # Label priority (all ports):
@@ -133,7 +147,7 @@ def train_port(port: str, mlflow_enabled: bool = False) -> None:
     # Check for degenerate all-zero label: port is confirmed stable, skip M2.
     if resolved_label is not None and int(resolved_label.sum()) == 0:
         print(f"\n[M2] SKIP — PortWatch confirms {port} is a stable port (0 disrupted hours).")
-        print(f"       No binary disruption model is meaningful for this port.")
+        print("       No binary disruption model is meaningful for this port.")
     else:
         print(f"\n[M2] Training Binary Detector (label: {m2_label_source})...")
         try:

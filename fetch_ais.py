@@ -421,4 +421,4 @@ Examples:
         event_rate = float(label.mean()) * 100
         n_events   = int(label.sum())
         print(f"Disruption hours: {n_events:,} ({event_rate:.1f}% of all hours)")
-        print(f"\nNext: conda run -n personal python train.py --port houston")
+        print("\nNext: conda run -n personal python train.py --port houston")

@@ -292,7 +292,7 @@ def fetch_port_all(port: str, save_dir: str = "data", days_back: int = DEFAULT_D
     print(f"  Port:  ({lat}, {lon})")
     print(f"  Range: {start_date} → {end_date}  ({days_back} days)")
     if zones:
-        print(f"  Zones:")
+        print("  Zones:")
         for z in zones:
             print(f"    {z['prefix']:12s}  lat={z['lat']:7.4f}  lon={z['lon']:8.4f}  {z['distance_km']}km  bearing={z['bearing']}°")
     print(f"{'='*60}")

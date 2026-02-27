@@ -256,7 +256,7 @@ Then update train.py to use make_storm_disruption_label() as the M2 ground truth
     )
     args = parser.parse_args()
 
-    print(f"Houston Ship Channel — NCEI Storm Events disruption label\n")
+    print("Houston Ship Channel — NCEI Storm Events disruption label\n")
     activity = fetch_houston_disruptions(
         save_dir=args.save_dir,
         first_year=args.first_year,
@@ -264,9 +264,9 @@ Then update train.py to use make_storm_disruption_label() as the M2 ground truth
     )
 
     if not activity.empty:
-        print(f"\nEvent type breakdown:")
+        print("\nEvent type breakdown:")
         # Load raw events to show breakdown
         raw = pd.read_parquet(Path(args.save_dir) / "houston_storm_events.parquet")
         print(raw["EVENT_TYPE"].value_counts().to_string())
         print(f"\nMax wind recorded: {raw['MAGNITUDE'].max():.0f} kt")
-        print(f"\nNext: conda run -n personal python train.py --port houston")
+        print("\nNext: conda run -n personal python train.py --port houston")

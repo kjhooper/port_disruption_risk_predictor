@@ -34,6 +34,14 @@ CLASSIFIER_FEATURES = [
     "days_to_holiday",
 ]
 
+WEATHER_COLORS = {
+    "clear":        "#00d4aa",
+    "fog":          "#8899aa",
+    "rain_snow":    "#4a9eff",
+    "showers":      "#7b5eff",
+    "thunderstorm": "#e84545",
+}
+
 FORECAST_TARGETS = ["wind_speed_10m", "precipitation", "pressure_msl", "wave_height"]
 HORIZONS  = [24, 48, 72]   # hours ahead
 LAG_HOURS = [1, 3, 6, 12, 24]
@@ -296,6 +304,126 @@ def train_forecaster(
             y_pred = reg.predict(X_te)
             met = eval_forecaster(y_te.values, y_pred)
             models[(target, horizon)] = (reg, met)
+
+    return models
+
+
+def train_forecast_classifier(
+    df: pd.DataFrame,
+    port: str,
+    horizons: list = None,
+) -> dict:
+    """
+    Train one XGBClassifier per horizon to predict WMO weather group at T+H.
+
+    Option B predictive M1: uses lag features at T to predict weather type at T+H.
+    Features: lags of all FORECAST_TARGETS + weather_code lags at LAG_HOURS
+              + wind_direction / humidity / cape context.
+    Time-based split: last 365 days = test.
+
+    Returns dict keyed by horizon_hours → (fitted XGBClassifier, eval_metrics_dict).
+    """
+    if horizons is None:
+        horizons = HORIZONS
+
+    # Build lag features for all forecast targets
+    df_lag = df.copy()
+    for tgt in FORECAST_TARGETS:
+        if tgt in df_lag.columns:
+            df_lag = build_lag_features(df_lag, tgt, LAG_HOURS)
+
+    # Add weather_code lags as predictors
+    if "weather_code" in df_lag.columns:
+        df_lag = build_lag_features(df_lag, "weather_code", LAG_HOURS)
+
+    # Extra context features available at inference time
+    extra_features = [
+        c for c in ["wind_direction_10m", "relative_humidity_2m", "cape"]
+        if c in df_lag.columns
+    ]
+
+    lag_cols = [
+        f"{tgt}_lag_{h}h"
+        for tgt in FORECAST_TARGETS
+        for h in LAG_HOURS
+        if f"{tgt}_lag_{h}h" in df_lag.columns
+    ]
+    weather_lag_cols = [
+        f"weather_code_lag_{h}h"
+        for h in LAG_HOURS
+        if f"weather_code_lag_{h}h" in df_lag.columns
+    ]
+    feature_cols = lag_cols + weather_lag_cols + extra_features
+
+    train_idx, test_idx = _time_split(df_lag.index)
+
+    # Fill NaN in feature columns with column median (handles all-NaN cols via 0 fallback)
+    feature_df = df_lag[feature_cols].copy()
+    for col in feature_df.columns:
+        med = feature_df[col].median()
+        feature_df[col] = feature_df[col].fillna(med if pd.notna(med) else 0.0)
+
+    # Build the WMO group label series
+    y_all_labels = make_weather_code_label(df_lag)
+
+    models: dict = {}
+
+    for horizon in horizons:
+        # Shift label to get WMO group at T+H
+        y = y_all_labels.shift(-horizon)
+
+        # Keep rows where label is available (features already filled above)
+        valid = y.notna()
+        X_all = feature_df.loc[valid]
+        y_all = y[valid]
+
+        X_tr = X_all.loc[X_all.index.isin(train_idx)]
+        X_te = X_all.loc[X_all.index.isin(test_idx)]
+        y_tr = y_all.loc[y_all.index.isin(train_idx)]
+        y_te = y_all.loc[y_all.index.isin(test_idx)]
+
+        if len(X_tr) < 10 or len(X_te) < 10:
+            continue
+
+        classes = sorted(y_tr.unique())
+        label_to_int = {c: i for i, c in enumerate(classes)}
+        int_to_label = {v: k for k, v in label_to_int.items()}
+
+        y_tr_int = y_tr.map(label_to_int)
+        y_te_int = y_te.map(label_to_int)
+
+        sample_weights = compute_sample_weight("balanced", y_tr_int)
+
+        clf = XGBClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective="multi:softprob",
+            num_class=len(classes),
+            eval_metric="mlogloss",
+            random_state=42,
+            n_jobs=-1,
+        )
+        clf.fit(
+            X_tr, y_tr_int,
+            sample_weight=sample_weights,
+            eval_set=[(X_te, y_te_int)],
+            verbose=False,
+        )
+
+        # Attach label mappings as attributes for later inference
+        clf._label_to_int = label_to_int
+        clf._int_to_label = int_to_label
+        clf._classes = classes
+
+        y_prob = clf.predict_proba(X_te)
+        y_pred_int = y_prob.argmax(axis=1)
+        y_pred = pd.Series(y_pred_int, index=y_te.index).map(int_to_label)
+
+        met = eval_classifier(y_te.values, y_pred.values, y_prob)
+        models[horizon] = (clf, met)
 
     return models
 

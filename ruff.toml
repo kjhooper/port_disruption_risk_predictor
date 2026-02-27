@@ -1,0 +1,22 @@
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by line-length above)
+    "E741",  # ambiguous variable name (l, O, I — used in ML code)
+    "F401",  # unused import (some imports are re-exported)
+    "UP007", # X | Y union syntax (keep compat with 3.9)
+    "UP035", # deprecated typing imports — fine to keep for readability
+]
+
+[lint.per-file-ignores]
+"pages/*.py"      = ["S102"]  # exec() is intentional in multi-page shims
+"tests/*.py"      = ["S101"]  # assert is expected in tests
+"fetch_ais.py"    = ["F841"]  # rev_alias kept for readability as a build-step note
