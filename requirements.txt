@@ -5,13 +5,12 @@ streamlit==1.54.0
 plotly==6.5.2
 scikit-learn==1.5.0
 scipy==1.17.1
-prophet==1.1.5
 xgboost==2.0.3
-great-expectations==0.18.15
-mlflow==2.13.0
 pyarrow==23.0.1
 python-dotenv==1.0.1
 statsmodels>=0.14
 zstandard>=0.22
 joblib>=1.3
 holidays>=0.50
+# mlflow is an optional dependency — only needed with: python train.py --mlflow
+# Install separately if required: pip install mlflow==2.13.0
