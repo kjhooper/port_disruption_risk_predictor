@@ -8,13 +8,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+import requests
 import numpy as np
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import requests
 
 from fetch import fetch_openmeteo_historical, fetch_openmeteo_forecast, update_or_fetch, PORTS
 from quality import run_all_checks, quality_summary_df
@@ -88,8 +88,7 @@ with st.sidebar:
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
-RELEASE_BASE_URL = "https://github.com/kjhooper/port_disruption_risk_predictor/releases/download/dashboard"
-
+RELEASE_BASE_URL = "https://github.com/youruser/port_disruption_risk_predictor/releases/download/v0.2.0-alpha"
 
 def _load_parquet_from_release(filename: str) -> pd.DataFrame:
     """Load a parquet file from GitHub releases, cache locally after first download."""
@@ -123,6 +122,7 @@ def load_full_hist(port: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_portwatch_activity(port: str) -> pd.DataFrame:
+    from features import make_holiday_features, PORT_HOLIDAY_CALENDARS
     try:
         df = _load_parquet_from_release(f"{port}_portwatch_activity.parquet")
     except Exception:
@@ -148,6 +148,29 @@ def load_portwatch_activity(port: str) -> pd.DataFrame:
         df["is_holiday"]   = 0
         df["holiday_name"] = ""
     return df
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_m2_hindcast(port: str, _m2_model, days_back: int) -> pd.Series:
+    """Run M2 on full historical data and return hourly disruption probabilities."""
+
+    try:
+        df = _load_parquet_from_release(f"{port}_historical_wide.parquet")
+    except Exception:
+        return pd.Series(dtype=float)
+
+    cutoff = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days_back)
+    df = df[df.index >= cutoff]
+    try:
+        feat_df = compute_all_features(df.copy(), port)
+        X = build_feature_matrix(feat_df, port, include_zones=False)
+        for col in _m2_model.feature_names_in_:
+            if col not in X.columns:
+                X[col] = 0.0
+        X = X[list(_m2_model.feature_names_in_)]
+        probs = _m2_model.predict_proba(X)[:, 1]
+        return pd.Series(probs, index=X.index, name="m2_prob")
+    except Exception:
+        return pd.Series(dtype=float)
 
 
 @st.cache_resource
