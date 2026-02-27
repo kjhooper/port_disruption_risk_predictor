@@ -127,7 +127,7 @@ def load_portwatch_activity(port: str) -> pd.DataFrame:
         df = _load_parquet_from_release(f"{port}_portwatch_activity.parquet")
     except Exception:
         return pd.DataFrame()
-    
+
     if "portcalls" not in df.columns:
         return pd.DataFrame()
     portcalls = df["portcalls"].astype(float)
