@@ -276,6 +276,7 @@ def train_port(port: str, mlflow_enabled: bool = False) -> None:
         save_models(models_to_save, port)
     else:
         print("\n[WARN] No models trained — nothing saved.")
+        return
 
     # ── MLflow ─────────────────────────────────────────────────────────────────
     if mlflow_enabled:

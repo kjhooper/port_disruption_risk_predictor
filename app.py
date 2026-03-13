@@ -305,13 +305,52 @@ def compute_wcode_test_preds(port: str, _clf_24h) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# Known model names — must match what save_models() writes in model.py
+_MODEL_NAMES = ["wcode_predictors", "weather_numerics", "disruption_alerts"]
+
+
+def _load_model_from_release(port: str, name: str):
+    """
+    Download a single model file from GitHub Releases if not already cached locally.
+
+    Both local files and release assets use the same name: {port}_{name}.joblib
+    in the flat  models/  directory.
+    """
+    import joblib
+    local_path = Path("models") / f"{port}_{name}.joblib"
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    if not local_path.exists():
+        url = f"{RELEASE_BASE_URL}/{port}_{name}.joblib"
+        r = requests.get(url, timeout=120)
+        r.raise_for_status()
+        local_path.write_bytes(r.content)
+    return joblib.load(local_path)
+
+
 @st.cache_resource
 def load_port_models(port: str) -> dict:
+    """
+    Load all three models for a port.
+
+    Resolution order:
+      1. Local  models/{port}_{name}.joblib  (fast path — after training or prior download)
+      2. GitHub Release asset  {port}_{name}.joblib  (downloaded once, then cached locally)
+
+    Returns a dict keyed by model name (e.g. "wcode_predictors").
+    Missing models are silently skipped so the app degrades gracefully.
+    """
     import joblib
-    model_dir = Path("models") / port
-    if not model_dir.exists():
-        return {}
-    return {p.stem: joblib.load(p) for p in sorted(model_dir.glob("*.joblib"))}
+    result = {}
+    for name in _MODEL_NAMES:
+        local_path = Path("models") / f"{port}_{name}.joblib"
+        try:
+            if local_path.exists():
+                result[name] = joblib.load(local_path)
+            else:
+                result[name] = _load_model_from_release(port, name)
+        except Exception as e:
+            st.warning(f"Model `{name}` not available for {port}: {e}")
+    return result
 
 
 # ── Ship simulation helpers ──────────────────────────────────────────────────────

@@ -546,19 +546,37 @@ def save_models(models: dict, port: str) -> None:
     Save all models for a port to models/{port}/ using joblib.
 
     models: flat dict of str → any (model, tuple, etc.)
+
+    After saving, prints the `gh release upload` commands needed to publish
+    these files as GitHub Release assets.  Release assets are named
+    {port}_{name}.joblib so all ports can coexist in a single flat release.
     """
-    port_dir = MODEL_DIR / port
-    port_dir.mkdir(parents=True, exist_ok=True)
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    saved = []
     for name, obj in models.items():
-        joblib.dump(obj, port_dir / f"{name}.joblib")
-    print(f"Saved {len(models)} model(s) to {port_dir}/")
+        path = MODEL_DIR / f"{port}_{name}.joblib"
+        joblib.dump(obj, path)
+        saved.append((name, path))
+    print(f"Saved {len(saved)} model(s) to {MODEL_DIR}/")
+    print("\n  To publish to GitHub Releases, run:")
+    for name, path in saved:
+        size_mb = path.stat().st_size / 1_048_576
+        print(f"    gh release upload <tag> {path}  # {size_mb:.1f} MB")
 
 
 def load_models(port: str) -> dict:
-    """Load all saved models for a port from models/{port}/."""
-    port_dir = MODEL_DIR / port
-    if not port_dir.exists():
-        raise FileNotFoundError(
-            f"No models directory for port '{port}': {port_dir}"
-        )
-    return {path.stem: joblib.load(path) for path in sorted(port_dir.glob("*.joblib"))}
+    """
+    Load all saved models for a port from models/.
+
+    Files are named  {port}_{name}.joblib  and keyed by name, e.g. "wcode_predictors".
+    """
+    if not MODEL_DIR.exists():
+        raise FileNotFoundError(f"No models directory: {MODEL_DIR}")
+    prefix = f"{port}_"
+    result = {}
+    for path in sorted(MODEL_DIR.glob(f"{port}_*.joblib")):
+        key = path.stem[len(prefix):]
+        result[key] = joblib.load(path)
+    if not result:
+        raise FileNotFoundError(f"No models found for port '{port}' in {MODEL_DIR}")
+    return result
