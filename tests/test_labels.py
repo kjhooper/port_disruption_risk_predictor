@@ -122,10 +122,12 @@ def test_composite_high_wave_triggers():
     assert labels.tolist() == [0, 1]
 
 
-def test_composite_fog_triggers():
-    df = _df_n(2, td_spread=[5.0, 1.0])  # 1.0 < 2.0 fog threshold
+def test_composite_fog_does_not_trigger():
+    # td_spread is intentionally excluded from the composite label — fog is a feature
+    # (fog_risk_score), not a label driver. Ports operate in fog via VTS radar.
+    df = _df_n(2, td_spread=[5.0, 1.0])  # 1.0 < 2.0 would be fog threshold if enabled
     labels = make_composite_disruption_label(df, "rotterdam")
-    assert labels.tolist() == [0, 1]
+    assert labels.tolist() == [0, 0]
 
 
 def test_composite_severe_wmo_triggers_regardless_of_wind():

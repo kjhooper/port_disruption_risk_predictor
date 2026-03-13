@@ -1697,9 +1697,10 @@ with st.expander("📋 Model Performance", expanded=False):
                 # ── Dual colour-bar timeline: actual vs predicted ────────────
                 st.markdown("**Actual vs predicted weather class — T+24h test set (daily mode)**")
                 # Resample to daily mode so colour bars are readable (365 bars vs 8760)
-                _resample_mode = lambda s: s.resample("D").agg(
-                    lambda x: x.mode().iloc[0] if not x.empty and not x.mode().empty else None
-                )
+                def _resample_mode(s):
+                    return s.resample("D").agg(
+                        lambda x: x.mode().iloc[0] if not x.empty and not x.mode().empty else None
+                    )
                 _daily_true = _resample_mode(wcode_test_df["y_true"].dropna())
                 _daily_pred = _resample_mode(
                     wcode_test_df["y_pred"].reindex(wcode_test_df["y_true"].dropna().index)
