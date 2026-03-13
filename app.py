@@ -103,7 +103,7 @@ VESSEL_BASE_SPEEDS = {"container": 12, "tanker": 10, "bulk": 9, "tug": 6}
 
 KM_PER_DEGREE_LAT = 111.0
 
-RELEASE_BASE_URL = "https://github.com/kjhooper/port_disruption_risk_predictor/releases/download/v0.0.1"
+RELEASE_BASE_URL = "https://github.com/kjhooper/port_disruption_risk_predictor/releases/download/dashboard"
 
 # ── Data loading ────────────────────────────────────────────────────────────────
 
