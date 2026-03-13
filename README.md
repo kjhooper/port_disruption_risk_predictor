@@ -1,4 +1,4 @@
-# Port Weather Disruption Risk Scorer
+# Harbinger
 
 A simple, extensible ML project that produces a probabilistic weather-driven disruption risk score for major shipping ports. Built with rigor around data quality, model performance, and result acceptability metrics at every stage.
 
@@ -13,6 +13,7 @@ A simple, extensible ML project that produces a probabilistic weather-driven dis
 - [Project Structure](#project-structure)
 - [Ports Available](#ports-available)
 - [Setup](#setup)
+- [Deploying to Streamlit Cloud](#deploying-to-streamlit-cloud)
 - [Extension Ideas](#extension-ideas)
 
 ---
@@ -249,6 +250,14 @@ streamlit run app.py
 # Or run the Sprint 1 notebook directly
 python sprint1_pipeline.py
 ```
+
+---
+
+## Deploying to Streamlit Cloud
+
+1. Connect the repo and set **Main file path** to `app.py`.
+2. In **Advanced settings**, set **Python version** to **3.11** or **3.12** (not 3.13). This avoids long installs from missing wheels (e.g. scikit-learn building from source) and keeps `numpy<2` so dependency resolution stays consistent.
+3. Use the repo `requirements.txt` as-is; do not add `great-expectations` to it (the app does not use it and it constrains numpy).
 
 ---
 

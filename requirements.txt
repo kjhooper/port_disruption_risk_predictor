@@ -1,3 +1,5 @@
+# Keep numpy<2.0 for compatibility; do not add great-expectations (not used by app).
+# On Streamlit Cloud: Advanced settings → Python version → 3.11 or 3.12 (avoids 3.13 wheel builds).
 pandas>=2.2,<2.3
 numpy>=1.26,<2.0
 requests==2.31.0
@@ -12,5 +14,6 @@ statsmodels>=0.14
 zstandard>=0.22
 joblib>=1.3
 holidays>=0.50
+pydeck>=0.8
 # mlflow is an optional dependency — only needed with: python train.py --mlflow
 # Install separately if required: pip install mlflow==2.13.0

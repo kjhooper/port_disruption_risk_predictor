@@ -55,7 +55,14 @@ def make_binary_label(df: pd.DataFrame) -> pd.Series:
 # Wind and waves are the primary drivers; fog secondary; severe WMO tertiary.
 DISRUPTION_THRESHOLDS: dict[str, dict] = {
     "rotterdam": dict(wind_speed=15.0, wind_gusts=22.0, wave_height=2.5, td_spread=2.0),
-    "houston":   dict(wind_speed=15.0, wind_gusts=22.0, wave_height=2.5, td_spread=2.0),
+    # Houston Ship Channel is an inland, protected waterway — operational limits are
+    # lower than open-sea ports:
+    #   wind_speed 12 m/s  → NOAA marine warning threshold for Galveston Bay (~23 kt);
+    #                         narrow-channel STS operations suspend at Beaufort 6 (10.8 m/s)
+    #   wind_gusts 16 m/s  → practical crane/STS suspension on the exposed terminal faces
+    #   wave_height 1.0 m  → Galveston Bay fetch-limited waves; swell rarely exceeds 1 m
+    #                         inside the channel; offshore wave buoy at 2 m = channel ~1 m
+    "houston":   dict(wind_speed=12.0, wind_gusts=16.0, wave_height=1.0, td_spread=2.0),
     # Typhoon-belt ports: lower wave threshold (South China Sea / Philippine Sea swell);
     # higher td_spread (tropical humidity means fog forms at smaller T/Td gaps)
     "hong_kong": dict(wind_speed=15.0, wind_gusts=22.0, wave_height=2.0, td_spread=3.0),
@@ -80,11 +87,20 @@ def make_composite_disruption_label(
     """
     Physics-based binary disruption label for any port.
 
-    More operationally valid than WMO classification alone because:
-    - Wind (the primary port disruption driver) is orthogonal to WMO codes —
-      a gale under clear sky is WMO 0 but fully disruptive.
-    - Fog is detected via td_spread < threshold, which is more sensitive
-      than waiting for WMO 45/48 to appear.
+    Fires when any of these conditions hold:
+      - Wind speed > threshold (primary port disruption driver; orthogonal to WMO codes —
+        a gale under clear sky is WMO 0 but fully disruptive)
+      - Wind gusts > threshold (STS crane suspension band)
+      - Wave height > threshold (published operational wave limit)
+      - Severe WMO codes (heavy rain/snow, thunderstorm — excludes light drizzle)
+
+    NOTE — td_spread (fog risk) is intentionally excluded from this label.
+    Rotterdam and Houston operate in fog via VTS radar and pilot guidance; fog alone
+    does not suspend port operations. td_spread fires ~28% of the time in maritime
+    climates, which would inflate the positive label rate to ~30% and cause any
+    model trained on this label to predict disruption as a near-base state.
+    Fog risk is captured as a *feature* (fog_risk_score) so the model can still
+    learn its correlation with disruption events — it just isn't a label driver.
 
     Use this for Rotterdam where PortWatch traffic is too stable for traffic-drop labels.
     For Houston, Hong Kong, and Kaohsiung, prefer make_portwatch_disruption_label().
@@ -98,12 +114,22 @@ def make_composite_disruption_label(
         label |= df["wind_gusts_10m"] > t["wind_gusts"]
     if "wave_height" in df.columns:
         label |= df["wave_height"] > t["wave_height"]
-    if "td_spread" in df.columns:
-        label |= df["td_spread"] < t["td_spread"]
     if "weather_code" in df.columns:
         label |= df["weather_code"].isin(SEVERE_WMO_CODES)
 
     return label.astype("int8")
+
+
+def make_disruption_window_label(composite_label: pd.Series, h: int) -> pd.Series:
+    """
+    y[t] = 1 if any disruption occurs in (t, t+h].
+
+    Constructs a forward-looking window label: a ship operator at time t wants
+    to know whether conditions will become disruptive before t+h, not just
+    whether it is disruptive right now.
+    """
+    shifts = [composite_label.shift(-i) for i in range(1, h + 1)]
+    return pd.concat(shifts, axis=1).max(axis=1).fillna(0).astype("int8")
 
 
 def label_stats(df: pd.DataFrame) -> dict:

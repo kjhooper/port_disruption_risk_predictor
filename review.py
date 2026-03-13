@@ -12,7 +12,6 @@ import calendar
 import re
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import numpy as np
 import pandas as pd
@@ -40,7 +39,7 @@ from quality import run_all_checks, quality_summary_df
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Feature Review",
+    page_title="Harbinger – Review",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -897,6 +896,77 @@ with tab_stl:
                     else:
                         st.warning("Residual dominates — this variable is largely unpredictable from seasonal patterns alone.")
 
+                    # ── FFT Power Spectra ──────────────────────────────────────
+                    st.markdown("#### FFT Power Spectrum")
+                    st.markdown(
+                        "Fourier analysis decomposes the series into sinusoidal frequencies. "
+                        "**Left:** raw signal — peaks identify dominant cycles (expected: 24 h diurnal, "
+                        "168 h weekly). Validates the chosen STL period. "
+                        "**Right:** STL residual — should be flat (white noise). "
+                        "Remaining peaks are frequencies the decomposition missed."
+                    )
+
+                    _fft_ref_periods = [12, 24, 168]  # hours: semi-diurnal, diurnal, weekly
+                    _fft_ref_labels  = ["12 h", "24 h", "168 h"]
+
+                    def _fft_spectrum(values: np.ndarray) -> tuple:
+                        """Return (periods_hours, power) arrays, clipped to Nyquist."""
+                        n      = len(values)
+                        freqs  = np.fft.rfftfreq(n, d=1.0)         # cycles per hour
+                        power  = np.abs(np.fft.rfft(values)) ** 2
+                        # Skip DC component (index 0) and clip to n//2 hours max
+                        mask   = (freqs[1:] > 0) & (1.0 / freqs[1:] <= n / 2)
+                        periods = 1.0 / freqs[1:][mask]
+                        return periods, power[1:][mask]
+
+                    def _fft_figure(values: np.ndarray, title: str) -> go.Figure:
+                        periods, power = _fft_spectrum(values)
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=periods, y=power,
+                            mode="lines",
+                            line=dict(color=COLOR_CYCLE[0], width=1.2),
+                            name="Power",
+                        ))
+                        for ref_p, ref_label in zip(_fft_ref_periods, _fft_ref_labels):
+                            if ref_p <= periods.max():
+                                fig.add_vline(
+                                    x=ref_p,
+                                    line_dash="dot",
+                                    line_color="#f5a623",
+                                    opacity=0.7,
+                                    annotation_text=ref_label,
+                                    annotation_position="top right",
+                                    annotation_font_size=11,
+                                )
+                        fig.update_layout(**make_layout(
+                            height=300,
+                            title=title,
+                            xaxis_title="Period (hours)",
+                            yaxis_title="Power",
+                            yaxis_type="log",
+                            xaxis=dict(type="log"),
+                        ))
+                        return fig
+
+                    fft_col1, fft_col2 = st.columns(2)
+                    with fft_col1:
+                        st.plotly_chart(
+                            _fft_figure(series.values, f"FFT Power Spectrum — {stl_var} (raw)"),
+                            use_container_width=True,
+                        )
+                    with fft_col2:
+                        st.plotly_chart(
+                            _fft_figure(resid.values, f"FFT Power Spectrum — {stl_var} (STL residual)"),
+                            use_container_width=True,
+                        )
+                    st.caption(
+                        "Both axes are log-scaled. Orange dotted lines mark 12 h, 24 h, and 168 h reference periods. "
+                        "A flat residual spectrum indicates white noise — STL captured the signal. "
+                        "Peaks in the residual identify frequencies STL missed; these represent signal "
+                        "that M3 could learn but currently doesn't see cleanly."
+                    )
+
                 except Exception as e:
                     st.error(f"STL failed: {e}")
 
@@ -1011,6 +1081,14 @@ with tab_shift:
             st.info("Not enough data in both windows to run KS tests.")
 
 
+# Expected lead times per port/zone based on typical storm propagation speed
+EXPECTED_LAG_RANGES: dict = {
+    "rotterdam": {150: (3, 5),   300: (5, 10)},
+    "houston":   {150: (5, 10),  300: (10, 20)},
+    "hong_kong": {150: (6, 10),  300: (12, 20)},
+    "kaohsiung": {150: (6, 10),  300: (12, 20)},
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Tab 6 — Cross-correlation Lags
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1078,24 +1156,46 @@ with tab_xcorr:
             peak_corr   = corrs_arr[opt_idx]
             direction   = "Zone leads port" if opt_lag > 0 else "Simultaneous"
 
+            # Expected lag range for this zone distance
+            port_lag_map  = EXPECTED_LAG_RANGES.get(port, {})
+            exp_lo, exp_hi = port_lag_map.get(z["distance_km"], (None, None))
+            exp_range_str = f"{exp_lo}–{exp_hi}h" if exp_lo is not None else "—"
+
             xcorr_results.append({
-                "zone":             prefix,
-                "distance_km":      z["distance_km"],
-                "optimal_lag_hours": opt_lag,
-                "peak_correlation": round(float(peak_corr), 4),
-                "direction":        direction,
+                "zone":               prefix,
+                "distance_km":        z["distance_km"],
+                "optimal_lag_hours":  opt_lag,
+                "peak_correlation":   round(float(peak_corr), 4),
+                "direction":          direction,
+                "expected_lag_range": exp_range_str,
             })
 
+            trace_color = COLOR_CYCLE[i % len(COLOR_CYCLE)]
             fig_xcorr.add_trace(go.Scatter(
                 x=lags,
                 y=corrs,
                 name=f"{prefix} ({z['distance_km']}km)",
-                line=dict(color=COLOR_CYCLE[i % len(COLOR_CYCLE)], width=2),
+                line=dict(color=trace_color, width=2),
             ))
+
+            # Shaded band for expected lag range
+            if exp_lo is not None:
+                y_range = [min(0, float(np.nanmin(corrs))), max(0, float(np.nanmax(corrs)))]
+                fig_xcorr.add_trace(go.Scatter(
+                    x=[exp_lo, exp_lo, exp_hi, exp_hi, exp_lo],
+                    y=[y_range[0], y_range[1], y_range[1], y_range[0], y_range[0]],
+                    fill="toself",
+                    fillcolor=trace_color,
+                    opacity=0.12,
+                    line=dict(width=0),
+                    showlegend=False,
+                    hoverinfo="skip",
+                    name=f"{prefix} expected range",
+                ))
 
         fig_xcorr.add_vline(x=0, line_dash="dash", line_color="white", opacity=0.4)
         fig_xcorr.update_layout(**make_layout(
-            height=380,
+            height=400,
             title=f"Cross-correlation: zone vs port `{xcorr_var}`",
             xaxis_title="Lag (hours) — zone leads port →",
             yaxis_title="Pearson r",
@@ -1114,7 +1214,9 @@ with tab_xcorr:
 
         st.caption(
             "A peak at lag=N means the zone variable tends to shift N hours *before* the port "
-            "responds — this is the maximum predictive lead time available from that upstream point."
+            "responds — this is the maximum predictive lead time available from that upstream point. "
+            "Shaded bands show the expected lead-time range based on typical storm propagation speed; "
+            "agreement between the observed peak and the shaded band means the zone is behaving as predicted."
         )
 
 

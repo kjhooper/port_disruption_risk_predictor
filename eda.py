@@ -10,7 +10,6 @@ Run with: conda run -n personal streamlit run eda.py
 import re
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import numpy as np
 import pandas as pd
@@ -28,7 +27,7 @@ from features import compute_all_features
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Port EDA",
+    page_title="Harbinger – EDA",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
